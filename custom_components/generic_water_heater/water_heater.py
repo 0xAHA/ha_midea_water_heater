@@ -76,7 +76,8 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
         self._current_operation = STATE_ON
         self._current_temperature = None
         self._operation_list = [
-            STATE_ON,
+            "Eco",
+            "Hybrid"
             STATE_OFF,
         ]
         self._attr_available = False
