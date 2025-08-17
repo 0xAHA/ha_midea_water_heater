@@ -25,7 +25,18 @@ from homeassistant.helpers.restore_state import RestoreEntity
 from homeassistant.const import ATTR_TEMPERATURE, UnitOfTemperature
 from homeassistant.util.unit_conversion import TemperatureConverter
 
-from . import CONF_HEATER, CONF_SENSOR, CONF_TARGET_TEMP, CONF_TEMP_DELTA, CONF_TEMP_MIN, CONF_TEMP_MAX
+from . import (
+    CONF_HEATER, 
+    CONF_SENSOR, 
+    CONF_TARGET_TEMP, 
+    CONF_TEMP_DELTA, 
+    CONF_TEMP_MIN, 
+    CONF_TEMP_MAX,
+    CONF_MODE_SWITCH,
+    CONF_MODBUS_HUB,
+    CONF_MODBUS_UNIT,
+    CONF_TARGET_TEMP_REGISTER
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -46,10 +57,10 @@ async def async_setup_platform(
         temp_delta = config.get(CONF_TEMP_DELTA)
         min_temp = config.get(CONF_TEMP_MIN)
         max_temp = config.get(CONF_TEMP_MAX)
-        mode_switch_entity_id = config.get("mode_switch")  # Add this
-        modbus_hub = config.get("modbus_hub")              # Add this
-        modbus_unit = config.get("modbus_unit", 1)         # Add this
-        target_temp_register = config.get("target_temp_register", 2)  # Add this
+        mode_switch_entity_id = config.get(CONF_MODE_SWITCH)
+        modbus_hub = config.get(CONF_MODBUS_HUB)
+        modbus_unit = config.get(CONF_MODBUS_UNIT, 1)
+        target_temp_register = config.get(CONF_TARGET_TEMP_REGISTER, 2)
         unit = hass.config.units.temperature_unit
 
         entities.append(
