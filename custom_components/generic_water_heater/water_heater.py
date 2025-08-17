@@ -46,11 +46,17 @@ async def async_setup_platform(
         temp_delta = config.get(CONF_TEMP_DELTA)
         min_temp = config.get(CONF_TEMP_MIN)
         max_temp = config.get(CONF_TEMP_MAX)
+        mode_switch_entity_id = config.get("mode_switch")  # Add this
+        modbus_hub = config.get("modbus_hub")              # Add this
+        modbus_unit = config.get("modbus_unit", 1)         # Add this
+        target_temp_register = config.get("target_temp_register", 2)  # Add this
         unit = hass.config.units.temperature_unit
 
         entities.append(
             GenericWaterHeater(
-                name, heater_entity_id, sensor_entity_id, target_temp, temp_delta, min_temp, max_temp, unit
+                name, heater_entity_id, sensor_entity_id, target_temp, temp_delta, 
+                min_temp, max_temp, unit, mode_switch_entity_id, modbus_hub, 
+                modbus_unit, target_temp_register
             )
         )
 
@@ -61,7 +67,8 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
     """Representation of a generic water_heater device."""
 
     def __init__(
-        self, name, heater_entity_id, sensor_entity_id, target_temp, temp_delta, min_temp, max_temp, unit
+        self, name, heater_entity_id, sensor_entity_id, target_temp, temp_delta, min_temp, max_temp, unit,
+        mode_switch_entity_id=None, modbus_hub=None, modbus_unit=1, target_temp_register=2  # Add these
     ):
         """Initialize the water_heater device."""
         self._attr_name = name
@@ -78,10 +85,14 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
         self._operation_list = [
             "Eco",
             "Hybrid"
-            STATE_OFF,
+            "Off",
         ]
         self._attr_available = False
         self._attr_should_poll = False
+        self.mode_switch_entity_id = mode_switch_entity_id
+        self._modbus_hub = modbus_hub
+        self._modbus_unit = modbus_unit
+        self._target_temp_register = target_temp_register
 
     @property
     def current_temperature(self):
@@ -126,13 +137,59 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
 
     async def async_set_temperature(self, **kwargs):
         """Set new target temperatures."""
-        self._target_temperature = kwargs.get(ATTR_TEMPERATURE)
-        await self._async_control_heating()
-
+        temperature = kwargs.get(ATTR_TEMPERATURE)
+        if temperature is None:
+            return
+        
+        self._target_temperature = temperature
+    
+    # Write to modbus register if configured
+    if self._modbus_hub and self._target_temp_register:
+        await self.hass.services.async_call(
+            "modbus", "write_register",
+            {
+                "hub": self._modbus_hub,
+                "unit": self._modbus_unit,
+                "address": self._target_temp_register,
+                "value": int(temperature)
+            }
+        )
+    
+    self.async_write_ha_state()
     async def async_set_operation_mode(self, operation_mode):
         """Set new operation mode."""
         self._current_operation = operation_mode
-        await self._async_control_heating()
+        
+        if operation_mode == "off":
+            # Turn off main switch
+            await self.hass.services.async_call(
+                "switch", "turn_off", 
+                {"entity_id": self.heater_entity_id}
+            )
+        elif operation_mode == "eco":
+            # Set mode switch to off (economy) and turn on main switch
+            if self.mode_switch_entity_id:
+                await self.hass.services.async_call(
+                    "switch", "turn_off", 
+                    {"entity_id": self.mode_switch_entity_id}
+                )
+            await self.hass.services.async_call(
+                "switch", "turn_on", 
+                {"entity_id": self.heater_entity_id}
+            )
+        elif operation_mode == "hybrid":
+            # Set mode switch to on (hybrid) and turn on main switch
+            if self.mode_switch_entity_id:
+                await self.hass.services.async_call(
+                    "switch", "turn_on", 
+                    {"entity_id": self.mode_switch_entity_id}
+                )
+            await self.hass.services.async_call(
+                "switch", "turn_on", 
+                {"entity_id": self.heater_entity_id}
+            )
+        
+        self.async_write_ha_state()
 
     async def async_added_to_hass(self):
         """Run when entity about to be added."""
@@ -168,6 +225,13 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
             STATE_UNKNOWN,
         ):
             self._attr_available = True
+
+        if self.mode_switch_entity_id:
+            self.async_on_remove(
+                async_track_state_change_event(
+                    self.hass, [self.mode_switch_entity_id], self._async_switch_changed
+                )
+            )
         self.async_write_ha_state()
 
     async def _async_sensor_changed(self, event):
@@ -191,31 +255,30 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
         """Handle heater switch state changes."""
         new_state = event.data.get("new_state")
         _LOGGER.debug(f"New switch state = {new_state}")
+        
         if new_state is None or new_state.state in (STATE_UNAVAILABLE, STATE_UNKNOWN):
             self._attr_available = False
         else:
             self._attr_available = True
             _LOGGER.debug("%s became Available", self.name)
-            if new_state.state == STATE_ON and self._current_operation == STATE_OFF:
-                self._current_operation = STATE_ON
-                _LOGGER.debug("STATE_ON")
-            elif new_state.state == STATE_OFF and self._current_operation == STATE_ON:
-                self._current_operation = STATE_OFF
-                _LOGGER.debug("STATE_OFF")
-
+            
+            # Update operation based on switch states
+            main_switch = self.hass.states.get(self.heater_entity_id)
+            mode_switch = self.hass.states.get(self.mode_switch_entity_id) if self.mode_switch_entity_id else None
+            
+            if main_switch and main_switch.state == STATE_OFF:
+                self._current_operation = "off"
+            elif main_switch and main_switch.state == STATE_ON:
+                if mode_switch and mode_switch.state == STATE_ON:
+                    self._current_operation = "hybrid"
+                else:
+                    self._current_operation = "eco"
+    
         self.async_write_ha_state()
 
     async def _async_control_heating(self):
-        """Check if we need to turn heating on or off."""
-        if self._current_operation == STATE_OFF or self._current_temperature is None:
-            pass
-        elif (
-            abs(self._current_temperature - self._target_temperature) > self._temperature_delta
-        ):
-            if self._current_temperature < self._target_temperature:
-                await self._async_heater_turn_on()
-            else:
-                await self._async_heater_turn_off()
+        """Update state only - no automatic control."""
+        # Just update the state, no automatic heating control
         self.async_write_ha_state()
 
     async def _async_heater_turn_on(self):
